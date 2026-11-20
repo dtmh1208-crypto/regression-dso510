@@ -1,0 +1,16 @@
+[project]
+name = "fieldnotes-regression-playground"
+version = "1.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==2.2.2",
+    "pandas==2.2.3",
+    "scipy==1.15.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.pip]
+# These packages have Python 3.12 Linux wheels; never compile them on Vercel.
+only-binary = ["numpy", "pandas", "scipy"]
