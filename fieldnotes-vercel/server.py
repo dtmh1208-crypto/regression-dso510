@@ -115,7 +115,43 @@ def fit(x, y, names, robust):
     result = {'n':n,'r2':float(1-residual@residual/total),'coefficients':coefficients}
     return result, contrast
 
-def analyze(config):
+def apply_cleaning_rule(source, rule, recoded_rows=None):
+    """Apply exclusions, simultaneous recodes, and bounds; count each stage."""
+    s = source.replace([np.inf, -np.inf], np.nan).copy()
+    missing_before = int(s.isna().sum())
+    codes = [float(value) for value in rule.get('exclude', [])]
+    if not all(np.isfinite(value) for value in codes):
+        raise ValueError('Excluded response codes must be finite numbers.')
+    excluded = s.isin(codes)
+    for bounds in rule.get('exclude_ranges', []):
+        if len(bounds) != 2 or not all(np.isfinite(float(v)) for v in bounds) or float(bounds[0]) > float(bounds[1]):
+            raise ValueError('Exclusion ranges need two finite bounds in increasing order.')
+        excluded |= s.between(float(bounds[0]), float(bounds[1]))
+    code_excluded = int((s.notna() & excluded).sum())
+    s = s.mask(excluded)
+    mapping = {float(k):float(v) for k,v in rule.get('recode', {}).items()}
+    if not all(np.isfinite(k) and np.isfinite(v) for k,v in mapping.items()):
+        raise ValueError('Recode values must be finite numbers.')
+    recodes = [{'from':old,'to':new,'n':int(s.eq(old).sum())} for old,new in mapping.items() if old != new]
+    recoded = sum(item['n'] for item in recodes)
+    if recoded_rows is not None:
+        recoded_rows |= s.isin([item['from'] for item in recodes])
+    s = s.replace(mapping)
+    minimum, maximum = rule.get('min'), rule.get('max')
+    if minimum is not None and not np.isfinite(float(minimum)) or maximum is not None and not np.isfinite(float(maximum)):
+        raise ValueError('Range limits must be finite numbers.')
+    if minimum is not None and maximum is not None and float(minimum) > float(maximum):
+        raise ValueError('Minimum cannot be greater than maximum.')
+    outside = pd.Series(False,index=s.index)
+    if minimum is not None: outside |= s < float(minimum)
+    if maximum is not None: outside |= s > float(maximum)
+    range_excluded = int((s.notna() & outside).sum())
+    s = s.mask(outside)
+    return s, {'missing_before':missing_before,'code_excluded':code_excluded,'range_excluded':range_excluded,
+               'excluded':code_excluded+range_excluded,'recoded':recoded,'recodes':recodes,
+               'unavailable':int(s.isna().sum()),'retained':int(s.notna().sum())}
+
+def cleaned_frame(config):
     if not isinstance(config, dict):
         raise ValueError('Model settings must be a JSON object.')
     roles = ['x','y','z','control']
@@ -125,20 +161,33 @@ def analyze(config):
         raise ValueError('Choose four different, valid variables.')
     frame = pd.DataFrame({n:column(n) for n in selected})
     audit = []
+    recoded_rows = pd.Series(False,index=frame.index)
     for name in selected:
-        s = frame[name].copy()
         rule = config.get('rules',{}).get(name, dictionary().get(name,{}).get('rule',{}))
-        before = s.notna()
-        s = s.mask(s.isin(rule.get('exclude',[])))
-        mapping = {float(k):float(v) for k,v in rule.get('recode',{}).items()}
-        s = s.replace(mapping)
-        if rule.get('min') is not None:
-            s = s.where(s >= float(rule['min']))
-        if rule.get('max') is not None:
-            s = s.where(s <= float(rule['max']))
-        s = s.replace([np.inf,-np.inf], np.nan)
-        audit.append({'variable':name,'missing_before':int((~before).sum()),'excluded':int((before & s.isna()).sum()),'unavailable':int(s.isna().sum())})
+        s, counts = apply_cleaning_rule(frame[name], rule, recoded_rows)
+        audit.append({'variable':name, **counts})
         frame[name] = s
+    return frame, audit, recoded_rows
+
+def preview_cleaning(config):
+    frame, audit, recoded_rows = cleaned_frame(config)
+    complete = frame.notna().all(axis=1)
+    name = config.get('preview_variable', config['y'])
+    if name not in frame: raise ValueError('Choose one of the selected variables to preview.')
+    before, after = column(name), frame[name]
+    changed = before.notna() & (after.isna() | before.ne(after))
+    examples = []
+    for index in frame.index[changed][:8]:
+        examples.append({'before':float(before.loc[index]),'after':float(after.loc[index]) if pd.notna(after.loc[index]) else None,
+                         'retained_in_sample':bool(complete.loc[index])})
+    return {'base_n':len(frame),'n':int(complete.sum()),'removed':int((~complete).sum()),'audit':audit,
+            'recoded_rows':int(recoded_rows.sum()),'recoded_rows_retained':int((recoded_rows & complete).sum()),
+            'recoded_rows_removed':int((recoded_rows & ~complete).sum()),'recoded_cells':sum(a['recoded'] for a in audit),
+            'variable':name,'examples':examples,'config':config}
+
+def analyze(config):
+    frame, audit, _ = cleaned_frame(config)
+    selected = [config[r] for r in ['x','y','z','control']]
     frame = frame.dropna()
     if len(frame) < 30:
         raise ValueError('Fewer than 30 complete rows remain. Review cleaning rules.')
@@ -211,11 +260,11 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         except (ValueError,KeyError) as error: self.send_json({'error':str(error)},400)
     def do_POST(self):
-        if self.path != '/api/analyze': return self.send_json({'error':'Unknown endpoint'},404)
+        if self.path not in ['/api/analyze','/api/preview-cleaning']: return self.send_json({'error':'Unknown endpoint'},404)
         try:
             if int(self.headers.get('Content-Length',0)) > 100000: raise ValueError('Request too large.')
             config=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))))
-            with LOCK: result=analyze(config)
+            with LOCK: result=preview_cleaning(config) if self.path=='/api/preview-cleaning' else analyze(config)
             self.send_json(result)
         except (ValueError,KeyError,TypeError,np.linalg.LinAlgError) as error: self.send_json({'error':str(error)},400)
 

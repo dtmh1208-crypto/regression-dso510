@@ -27,6 +27,8 @@ def route_request(method, path, body=b''):
             return 200, server.profile(name)
         if method == 'POST' and endpoint == 'analyze':
             return 200, server.analyze(json.loads(body))
+        if method == 'POST' and endpoint == 'preview-cleaning':
+            return 200, server.preview_cleaning(json.loads(body))
     return 404, {'error':'Unknown API endpoint.'}
 
 class ApiHandler(BaseHTTPRequestHandler):

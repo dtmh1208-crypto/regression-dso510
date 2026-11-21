@@ -4,6 +4,8 @@ import unittest
 import numpy as np
 from scipy.stats import linregress
 import server
+import pandas as pd
+from unittest.mock import patch
 
 CONFIG={'x':'SLEPTIM1','y':'MENTHLTH','z':'EMPLOY1','control':'_AGE80','one_values':[1,2], 'control_type':'numeric','se':'OLS','rules':{}}
 
@@ -49,5 +51,43 @@ class RegressionTests(unittest.TestCase):
         config=copy.deepcopy(CONFIG);config['one_values']=[]
         with self.assertRaisesRegex(ValueError,'Both moderator groups'):
             server.analyze(config)
+
+    def test_cleaning_counts_follow_actual_rule_order(self):
+        values=pd.Series([None,77,80,88,99,5,6,7])
+        cleaned,counts=server.apply_cleaning_rule(values,{'exclude':[77],'exclude_ranges':[[80,85]],'recode':{'88':0,'99':30,'5':6,'6':7},'min':0,'max':10})
+        self.assertEqual(counts['missing_before'],1)
+        self.assertEqual(counts['code_excluded'],2)
+        self.assertEqual(counts['recoded'],4)
+        self.assertEqual(counts['range_excluded'],1)
+        self.assertEqual(counts['retained'],4)
+        self.assertEqual(cleaned.dropna().tolist(),[0,6,7,7])
+        self.assertEqual(counts['unavailable'],4)
+
+    def test_cleaning_preview_matches_regression_sample(self):
+        config=copy.deepcopy(CONFIG)
+        config['rules']['_AGE80']={'exclude':[],'exclude_ranges':[[80,99]],'recode':{},'min':None,'max':None}
+        config['preview_variable']='_AGE80'
+        preview=server.preview_cleaning(config)
+        age=server.column('_AGE80')
+        self.assertEqual(preview['removed'],int(age.between(80,99).sum()))
+        self.assertEqual(preview['n'],server.analyze(config)['n'])
+        self.assertTrue(all(e['before']==80 and e['after'] is None for e in preview['examples']))
+
+    def test_multi_variable_summary_counts_people_once(self):
+        columns={'x':pd.Series([1,1,2,2,1,2]),'y':pd.Series([5,9,5,9,9,5]),
+                 'z':pd.Series([2,2,1,2,1,1]),'c':pd.Series([80,40,80,50,40,40])}
+        config={'x':'x','y':'y','z':'z','control':'c','rules':{
+            'x':{'recode':{'1':3}},'y':{'recode':{'5':6}},
+            'z':{'exclude':[2]},'c':{'exclude_ranges':[[80,99]]}}}
+        with patch('server.column_names',return_value=list(columns)),patch('server.column',side_effect=columns.__getitem__),patch('server.dictionary',return_value={}):
+            result=server.preview_cleaning(config)
+        self.assertEqual(result['base_n'],6)
+        self.assertEqual(result['removed'],4)  # Five variable exclusions overlap on one person.
+        self.assertEqual(result['n'],2)
+        self.assertEqual(result['recoded_cells'],6)
+        self.assertEqual(result['recoded_rows'],5)  # One person was recoded in both X and Y.
+        self.assertEqual(result['recoded_rows_retained'],2)
+        self.assertEqual(result['recoded_rows_removed'],3)
+        self.assertEqual(sum(a['excluded'] for a in result['audit']),5)
 
 if __name__=='__main__':unittest.main()
