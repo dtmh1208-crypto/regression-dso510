@@ -7,6 +7,7 @@ import RegressionPlot from './RegressionPlot';
 import { narrativeMarkdown } from './interpretation';
 import RegressionNavigation from './RegressionNavigation';
 import VariablesNavigation from './VariablesNavigation';
+import LoadingScene, { loadingProgress } from './LoadingScene';
 import CleaningPanel from './CleaningPanel';
 import ExploreCleaningSummary from './ExploreCleaningSummary';
 import { draftFor, type CleaningRule, type CleaningDraft } from './cleaning';
@@ -23,12 +24,13 @@ const num = (n:number) => n.toLocaleString(undefined,{maximumFractionDigits:0});
 const dec = (n:number) => n.toFixed(3);
 const pvalue = (p:number) => p<.001?'< 0.001':p.toFixed(3);
 const download = (name:string,body:string,type='application/json') => {const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([body],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
-async function api<T>(path:string,body?:unknown):Promise<T> {const response=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:undefined);const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data;}
+async function api<T>(path:string,body?:unknown,signal?:AbortSignal):Promise<T> {const response=await fetch(path,{...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),signal});if(!response.headers.get('Content-Type')?.includes('application/json'))throw new Error('The data service did not respond correctly. Please retry loading.');const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data;}
 
 function App(){
  const [variables,setVariables]=useState<Variable[]>([]),[baseN,setBaseN]=useState(320546),[rawN,setRawN]=useState(356158);
  const [config,setConfig]=useState<Config>(initial),[step,setStep]=useState(0),[error,setError]=useState(''),[busy,setBusy]=useState(false),[result,setResult]=useState<Result|null>(null);
  const [profiles,setProfiles]=useState<Record<string,Profile>>({}),[active,setActive]=useState('MENTHLTH'),[saved,setSaved]=useState<{name:string,result:Result}[]>(()=>{try{return JSON.parse(localStorage.getItem('fieldnotes-experiments')||'[]');}catch{return [];}}),[notice,setNotice]=useState('');
+ const [loadingError,setLoadingError]=useState(''),[loadAttempt,setLoadAttempt]=useState(0);
  const [cleaningDrafts,setCleaningDrafts]=useState<Record<string,CleaningDraft>>({});
  const [variablesOpen,setVariablesOpen]=useState(true);
  const [regressionOpen,setRegressionOpen]=useState(false),[activeSection,setActiveSection]=useState('regression-overview'),[pendingSection,setPendingSection]=useState<string|null>(null);
@@ -40,8 +42,30 @@ function App(){
  const rule=(n:string):Rule=>config.rules[n]||getVar(n)?.rule||{exclude:[],recode:{},min:null,max:null};
  const selected=[config.y,config.x,config.z,config.control];
  const stale=result && JSON.stringify(result.config)!==JSON.stringify(config);
- useEffect(()=>{api<{variables:Variable[],base_n:number,raw_n:number}>('/api/meta').then(data=>{setVariables(data.variables);setBaseN(data.base_n);setRawN(data.raw_n);}).catch(e=>setError(e.message));},[]);
- useEffect(()=>{if(!variables.length)return;let ignore=false;Promise.all([...new Set(selected)].filter(n=>!profiles[n]).map(async n=>[n,await api<Profile>('/api/profile/'+n)] as const)).then(entries=>{if(!ignore)setProfiles(p=>({...p,...Object.fromEntries(entries)}));}).catch(e=>{if(!ignore)setError(e.message);});return()=>{ignore=true;};},[config.x,config.y,config.z,config.control,variables]);
+ useEffect(()=>{
+  if(variables.length)return;
+  const controller=new AbortController();
+  api<{variables:Variable[],base_n:number,raw_n:number}>('/api/meta',undefined,controller.signal).then(data=>{
+   if(!Array.isArray(data.variables)||!data.variables.length)throw Error('No variable dictionary was returned. Please retry loading.');
+   setVariables(data.variables);setBaseN(data.base_n);setRawN(data.raw_n);
+  }).catch(e=>{if(!controller.signal.aborted)setLoadingError(e.message);});
+  return()=>controller.abort();
+ },[loadAttempt]);
+ useEffect(()=>{
+  if(!variables.length)return;
+  const controller=new AbortController();
+  const missing=[...new Set(selected)].filter(name=>!profiles[name]);
+  Promise.allSettled(missing.map(async name=>{
+   const data=await api<Profile>('/api/profile/'+name,undefined,controller.signal);
+   if(!Array.isArray(data.values))throw Error(`The profile for ${name} was incomplete. Please retry loading.`);
+   if(!controller.signal.aborted)setProfiles(current=>({...current,[name]:data}));
+  })).then(results=>{
+   if(controller.signal.aborted)return;
+   const failed=results.find((result):result is PromiseRejectedResult=>result.status==='rejected');
+   if(failed)setLoadingError(failed.reason instanceof Error?failed.reason.message:'A variable could not be loaded. Please retry.');
+  });
+  return()=>controller.abort();
+ },[config.x,config.y,config.z,config.control,variables,loadAttempt]);
 
  function setRole(role:string,value:string){setError('');setConfig(c=>({...c,[role]:value,...(role==='z'?{one_values:[]}: {})}));}
  const hasUnappliedCleaning=selected.some(n=>cleaningDrafts[n]&&JSON.stringify(cleaningDrafts[n])!==JSON.stringify(draftFor(rule(n))));
@@ -50,6 +74,8 @@ function App(){
  const groupOptions=(profiles[config.z]?.values||[]).filter(v=>!rule(config.z).exclude.includes(v.value)&&!(rule(config.z).exclude_ranges||[]).some(([a,b])=>v.value>=a&&v.value<=b));
  const labelCode=(n:string,v:number)=>getVar(n)?.codes.find(c=>Number(c.value)===v)?.label.split('Notes:')[0]||String(v);
  const csv=()=>{if(!result)return;const rows=[['model','term','estimate','standard_error','p_value','ci_low','ci_high','n','r_squared'],...result.models.flatMap((m,i)=>m.coefficients.map(c=>[i+1,c.term,c.estimate,c.se,c.p,c.low,c.high,m.n,m.r2]))];download('regression-results.csv',rows.map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\n'),'text/csv');};
+ const loadingTasks=[{id:'dictionary',label:'Variable dictionary & response codes',done:variables.length>0},...[...new Set(selected)].map(name=>({id:name,label:name===config.z?`${name} / moderator groups (D = 1 and D = 0)`:`${name} / values & frequencies`,done:!!profiles[name]}))];
+ if(loadingError||!loadingProgress(loadingTasks).ready)return <LoadingScene tasks={loadingTasks} error={loadingError} onRetry={()=>{setLoadingError('');setLoadAttempt(attempt=>attempt+1);}}/>;
  return <div className="app">
   <header><a className="brand" href="#" onClick={e=>{e.preventDefault();setStep(0);}}><span className="brand-icon"><FlaskConical size={23}/></span>field<span className="highlight">notes</span><small>/ DSO 510</small></a><nav><button className="nav-active" onClick={()=>setStep(0)}><BookOpen size={16}/> Playground</button><button disabled={step===1} onClick={()=>setStep(4)}><Save size={16}/> Experiments <span className="count">{saved.length}</span></button></nav><span className="local"><i/> Research workspace</span></header>
   <aside className="sidebar"><div className="side-title">YOUR RESEARCH WORKBENCH</div><div className="project"><span className="folder">▰</span><strong>Final presentation</strong><small>BRFSS · 2025</small></div><div className="side-title workflow">WORKFLOW <span>04 steps</span></div>{workflow.map((item,index)=>{const Icon=item.icon;if(item.id===0)return <VariablesNavigation key={item.id} selected={step===0||step===1} cleaning={step===1} open={variablesOpen||step===1} onVariables={()=>{setVariablesOpen(step!==0?true:!variablesOpen);setStep(0);}} onCleaning={()=>openCleaning()}/>;if(item.id===3)return <RegressionNavigation key={item.id} selected={step===3} disabled={step===1} open={regressionOpen} active={activeSection} onToggle={()=>{setRegressionOpen(step!==3?true:!regressionOpen);setStep(3);}} onNavigate={navigateRegression}/>;return <button key={item.id} disabled={step===1} title={step===1?'Return to Variables first':undefined} className={'side-link '+(step===item.id?'selected':'')} onClick={()=>setStep(item.id)}><Icon size={17}/><span>{String(index+1).padStart(2,'0')}. {item.label}</span>{step===item.id&&<ChevronRight size={15}/>}</button>;})}<div className="side-bottom"><span className="status-dot"/> Evidence before conclusions.</div></aside>

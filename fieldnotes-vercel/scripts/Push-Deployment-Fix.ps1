@@ -50,7 +50,7 @@ $changes = @(
         @{path='fieldnotes-vercel/vercel.json'; mode='100644'; type='blob'; content=$vercelContent}
     )
 if ($IncludePlayground) {
-    foreach ($relativePath in @('src/main.tsx','src/VariablesNavigation.tsx','src/RegressionNavigation.tsx','src/CleaningPanel.tsx','src/ExploreCleaningSummary.tsx','src/cleaning.ts','src/style.css','server.py','api_service.py','test_service.py','README.md','DEPLOYMENT.md','scripts/Push-Deployment-Fix.ps1')) {
+    foreach ($relativePath in @('src/main.tsx','src/LoadingScene.tsx','src/VariablesNavigation.tsx','src/RegressionNavigation.tsx','src/CleaningPanel.tsx','src/ExploreCleaningSummary.tsx','src/cleaning.ts','src/style.css','server.py','api_service.py','test_service.py','README.md','DEPLOYMENT.md','scripts/Push-Deployment-Fix.ps1')) {
         $localPath = Join-Path $PSScriptRoot ('..\' + $relativePath.Replace('/', '\'))
         $fileText = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $localPath).Path, [Text.Encoding]::UTF8)
         $changes += @{path=('fieldnotes-vercel/' + $relativePath); mode='100644'; type='blob'; content=$fileText}
@@ -62,7 +62,7 @@ $newTree = Invoke-FixApi "repos/$Repository/git/trees" 'POST' @{
 }
 if ($newTree.sha -eq $parent.tree.sha) { Write-Host 'The Python deployment fix is already committed. No change needed.'; return }
 $commit = Invoke-FixApi "repos/$Repository/git/commits" 'POST' @{
-    message=$(if ($IncludePlayground) {'Nest optional cleaning under Variables and simplify preview navigation'} else {'Use npm for frontend installation and retain Python 3.12 API pins'})
+    message=$(if ($IncludePlayground) {'Wait for all selected data and moderator groups with an ASCII loading scene'} else {'Use npm for frontend installation and retain Python 3.12 API pins'})
     tree=$newTree.sha
     parents=@($parentSha)
 }

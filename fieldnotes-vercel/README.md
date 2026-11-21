@@ -2,6 +2,8 @@
 
 For Vercel + Supabase hosting, follow [DEPLOYMENT.md](DEPLOYMENT.md). `release/` contains the folder-preserving GitHub ZIP, the separate compressed Supabase dataset, and upload instructions. Generated dependencies and caches can be restored with `npm install` when needed; the local launcher uses the retained compiled `dist/` build.
 
+The frontend waits for the metadata dictionary and every selected-variable profile before revealing the workspace, including the moderator's D=1 choices. Its local ASCII loading animation is inspired by the “building” row at https://ascii.rest/progress-bar/. Progress represents completed preparation requests, not download bytes or an estimated timer. It uses no external animation package or loading-time network dependency. Changing to an uncached variable shows the scene again until its profile is ready. Failures offer a retry while keeping successful profile responses cached; animation stops when reduced motion is preferred.
+
 A local React + TypeScript interface with a Python/pandas/SciPy regression service. The page uses the supplied CSV and codebook ZIP from the parent folder. No data is uploaded.
 
 ## Open the app
